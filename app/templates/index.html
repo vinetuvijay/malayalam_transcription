@@ -65,7 +65,13 @@
       color: white;
     }
     button.secondary { background: white; color: var(--ink); border: 1px solid var(--line); }
-    button:disabled { opacity: 0.6; cursor: wait; }
+    button:disabled {
+      background: #d6d3d1;
+      color: #78716c;
+      border-color: #d6d3d1;
+      cursor: not-allowed;
+      opacity: 1;
+    }
     .result { margin-top: 1rem; min-height: 6rem; }
     .result h2 { font-size: 0.9rem; margin: 0 0 0.5rem; color: var(--muted); }
     #text {
@@ -98,7 +104,7 @@
 
       <div class="actions">
         <button type="button" id="record" class="secondary">Start recording</button>
-        <button type="submit" id="submit">Transcribe</button>
+        <button type="submit" id="submit" disabled>Transcribe</button>
       </div>
       <p class="status" id="status">Checking the model…</p>
     </form>

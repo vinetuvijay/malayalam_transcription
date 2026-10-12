@@ -106,9 +106,9 @@ def as_text(value) -> str:
     return str(value)
 
 
-def to_16k_mono(src: Path) -> "object":
+def to_16k_mono(src: Path):
+    import soundfile as sf
     import torch
-    import torchaudio
 
     dst = src.with_suffix(".16k.wav")
     try:
@@ -125,9 +125,16 @@ def to_16k_mono(src: Path) -> "object":
         detail = stderr[-1] if stderr else "Could not read that audio file."
         raise HTTPException(status_code=400, detail=detail) from exc
 
-    wav, sample_rate = torchaudio.load(dst)
+    audio, sample_rate = sf.read(dst, dtype="float32", always_2d=True)
+    wav = torch.from_numpy(audio.T)
     if sample_rate != 16000:
-        wav = torchaudio.transforms.Resample(sample_rate, 16000)(wav)
+        new_length = max(1, int(round(wav.shape[-1] * 16000 / sample_rate)))
+        wav = torch.nn.functional.interpolate(
+            wav.unsqueeze(0),
+            size=new_length,
+            mode="linear",
+            align_corners=False,
+        ).squeeze(0)
     return torch.mean(wav, dim=0, keepdim=True)
 
 
