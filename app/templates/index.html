@@ -1,0 +1,260 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Malayalam transcription</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --ink: #1c1917;
+      --muted: #57534e;
+      --line: #e7e5e4;
+      --paper: #fafaf9;
+      --accent: #9a3412;
+      --accent-ink: #fff7ed;
+      --ok: #166534;
+      --warn: #9a3412;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: "Segoe UI", sans-serif;
+      color: var(--ink);
+      background: var(--paper);
+    }
+    main {
+      max-width: 42rem;
+      margin: 0 auto;
+      padding: 2.5rem 1.25rem 4rem;
+    }
+    h1 { font-size: 1.75rem; margin-bottom: 0.25rem; }
+    .lede { color: var(--muted); margin-top: 0; }
+    form, .result {
+      background: white;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      padding: 1.25rem;
+    }
+    label { display: block; font-weight: 600; margin: 1rem 0 0.35rem; }
+    select, button { font: inherit; }
+    select {
+      width: 100%;
+      padding: 0.6rem 0.7rem;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: white;
+    }
+    .drop {
+      margin-top: 0.35rem;
+      padding: 1.5rem 1rem;
+      text-align: center;
+      border: 1.5px dashed var(--line);
+      border-radius: 10px;
+      background: #fff;
+    }
+    .drop.dragover { border-color: var(--accent); background: var(--accent-ink); }
+    .drop input { display: block; margin: 0.75rem auto 0; }
+    .actions { display: flex; flex-wrap: wrap; gap: 0.75rem; margin-top: 1rem; }
+    button {
+      border: 0;
+      border-radius: 8px;
+      padding: 0.7rem 1rem;
+      cursor: pointer;
+      background: var(--accent);
+      color: white;
+    }
+    button.secondary { background: white; color: var(--ink); border: 1px solid var(--line); }
+    button:disabled { opacity: 0.6; cursor: wait; }
+    .result { margin-top: 1rem; min-height: 6rem; }
+    .result h2 { font-size: 0.9rem; margin: 0 0 0.5rem; color: var(--muted); }
+    #text {
+      font-size: 1.35rem;
+      line-height: 1.6;
+      white-space: pre-wrap;
+    }
+    .status { color: var(--muted); min-height: 1.25rem; }
+    .status.error { color: var(--warn); }
+    .status.ready { color: var(--ok); }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Malayalam transcription</h1>
+    <p class="lede">IndicConformer turns a Malayalam recording into text. Use the microphone or upload a wav, mp3, m4a, or flac file.</p>
+
+    <form id="form">
+      <label for="decoder">Decoder</label>
+      <select id="decoder" name="decoder">
+        <option value="rnnt" selected>RNNT</option>
+        <option value="ctc">CTC</option>
+      </select>
+
+      <label>Audio</label>
+      <div class="drop" id="drop">
+        <div id="file-label">Drop a file here, or choose one.</div>
+        <input id="audio" name="audio" type="file" accept="audio/*,.wav,.mp3,.m4a,.flac,.ogg,.webm">
+      </div>
+
+      <div class="actions">
+        <button type="button" id="record" class="secondary">Start recording</button>
+        <button type="submit" id="submit">Transcribe</button>
+      </div>
+      <p class="status" id="status">Checking the model…</p>
+    </form>
+
+    <section class="result" aria-live="polite">
+      <h2>Transcription</h2>
+      <div id="text"></div>
+    </section>
+  </main>
+
+  <script>
+    const form = document.getElementById("form");
+    const audioInput = document.getElementById("audio");
+    const drop = document.getElementById("drop");
+    const fileLabel = document.getElementById("file-label");
+    const recordButton = document.getElementById("record");
+    const submitButton = document.getElementById("submit");
+    const status = document.getElementById("status");
+    const text = document.getElementById("text");
+
+    let recorder = null;
+    let chunks = [];
+    let modelReady = false;
+    let transcribing = false;
+    let recording = false;
+
+    function setStatus(message, kind) {
+      status.textContent = message || "";
+      status.className = "status" + (kind ? " " + kind : "");
+    }
+
+    function refreshButtons() {
+      submitButton.disabled = !modelReady || transcribing;
+      recordButton.disabled = transcribing;
+    }
+
+    function showFile(file) {
+      fileLabel.textContent = file ? file.name : "Drop a file here, or choose one.";
+    }
+
+    async function pollHealth() {
+      let nextReady = false;
+      let nextMessage = "Checking the model…";
+      let nextKind = "";
+      try {
+        const response = await fetch("/health");
+        const payload = await response.json();
+        if (payload.status === "ready") {
+          nextReady = true;
+          nextMessage = "Model is ready.";
+          nextKind = "ready";
+        } else if (payload.status === "error") {
+          nextMessage = payload.detail || "The model failed to load.";
+          nextKind = "error";
+        } else {
+          nextMessage = "Downloading IndicConformer. The first start can take several minutes.";
+        }
+      } catch (error) {
+        nextMessage = "The transcription service is not responding.";
+        nextKind = "error";
+      }
+      modelReady = nextReady;
+      if (!transcribing && !recording) setStatus(nextMessage, nextKind);
+      refreshButtons();
+    }
+
+    audioInput.addEventListener("change", () => {
+      showFile(audioInput.files[0] || null);
+    });
+
+    drop.addEventListener("dragover", (event) => {
+      event.preventDefault();
+      drop.classList.add("dragover");
+    });
+    drop.addEventListener("dragleave", () => drop.classList.remove("dragover"));
+    drop.addEventListener("drop", (event) => {
+      event.preventDefault();
+      drop.classList.remove("dragover");
+      const file = event.dataTransfer.files[0];
+      if (!file) return;
+      const transfer = new DataTransfer();
+      transfer.items.add(file);
+      audioInput.files = transfer.files;
+      showFile(file);
+    });
+
+    recordButton.addEventListener("click", async () => {
+      if (recorder && recorder.state === "recording") {
+        recorder.stop();
+        recordButton.textContent = "Start recording";
+        return;
+      }
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        chunks = [];
+        recorder = new MediaRecorder(stream);
+        recorder.ondataavailable = (event) => {
+          if (event.data.size > 0) chunks.push(event.data);
+        };
+        recorder.onstop = () => {
+          stream.getTracks().forEach((track) => track.stop());
+          recording = false;
+          const blob = new Blob(chunks, { type: recorder.mimeType || "audio/webm" });
+          const file = new File([blob], "recording.webm", { type: blob.type });
+          const transfer = new DataTransfer();
+          transfer.items.add(file);
+          audioInput.files = transfer.files;
+          showFile(file);
+          setStatus("Recording ready.", modelReady ? "ready" : "");
+          refreshButtons();
+        };
+        recorder.start();
+        recording = true;
+        recordButton.textContent = "Stop recording";
+        setStatus("Recording…");
+      } catch (error) {
+        recording = false;
+        setStatus("Microphone access was blocked.", "error");
+      }
+    });
+
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const file = audioInput.files[0];
+      if (!file) {
+        setStatus("Choose or record audio first.", "error");
+        return;
+      }
+      const body = new FormData();
+      body.append("audio", file);
+      body.append("decoder", document.getElementById("decoder").value);
+      body.append("language", "ml");
+      transcribing = true;
+      refreshButtons();
+      setStatus("Transcribing…");
+      text.textContent = "";
+      try {
+        const response = await fetch("/transcribe", { method: "POST", body });
+        const payload = await response.json();
+        if (!response.ok) {
+          const detail = payload.detail;
+          throw new Error(typeof detail === "string" ? detail : "Transcription failed.");
+        }
+        text.textContent = payload.text;
+        setStatus("Model is ready.", "ready");
+      } catch (error) {
+        text.textContent = "";
+        setStatus(error.message, "error");
+      } finally {
+        transcribing = false;
+        refreshButtons();
+      }
+    });
+
+    pollHealth();
+    setInterval(pollHealth, 3000);
+  </script>
+</body>
+</html>

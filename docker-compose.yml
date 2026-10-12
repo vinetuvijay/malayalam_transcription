@@ -1,0 +1,15 @@
+services:
+  asr:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      HF_HOME: /models
+      HF_TOKEN: ${HF_TOKEN:-}
+      LANGUAGE: ml
+      DECODER: rnnt
+    volumes:
+      - hf-cache:/models
+
+volumes:
+  hf-cache:
