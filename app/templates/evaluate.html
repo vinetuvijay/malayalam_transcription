@@ -65,6 +65,14 @@
     .status.ready { color: var(--ok); }
     .score { color: var(--muted); margin: 0.25rem 0 0.75rem; }
     .malayalam { font-size: 1.25rem; line-height: 1.7; white-space: pre-wrap; }
+    .malayalam mark {
+      background: #ffedd5;
+      color: #9a3412;
+      border-radius: 3px;
+      padding: 0 0.08em;
+    }
+    audio { width: 100%; margin: 0.35rem 0 0.75rem; }
+    .legend { color: var(--muted); font-size: 0.85rem; margin: 0 0 0.35rem; }
     .result h2, .result h3 { margin: 0 0 0.35rem; }
     .result h2 { font-size: 1rem; }
     .result h3 { margin-top: 0.9rem; font-size: 0.85rem; color: var(--muted); font-weight: 600; }
@@ -75,7 +83,7 @@
   <main>
     <nav><a href="/">Transcription</a></nav>
     <h1>Evaluation</h1>
-    <p class="lede">Run the Malayalam transcriber on one or more clips. Paste the expected text when you have it, and the page shows the transcription beside that reference.</p>
+    <p class="lede">Run the Malayalam transcriber on one or more clips. Paste the expected text when you have it. Differences are highlighted, and you can play the clip.</p>
 
     <form id="form">
       <label for="decoder">Decoder</label>
@@ -132,35 +140,85 @@
       return (rate * 100).toFixed(1) + "%";
     }
 
-    function renderResult(payload) {
+    const clipUrls = [];
+
+    function forgetClips() {
+      clipUrls.forEach((url) => URL.revokeObjectURL(url));
+      clipUrls.length = 0;
+    }
+
+    function addPlayer(card, file) {
+      if (!file) return;
+      const url = URL.createObjectURL(file);
+      clipUrls.push(url);
+      const player = document.createElement("audio");
+      player.controls = true;
+      player.preload = "none";
+      player.src = url;
+      player.setAttribute("aria-label", "Play " + file.name);
+      card.appendChild(player);
+    }
+
+    function fillDiff(node, spans, fallback) {
+      node.replaceChildren();
+      if (!spans || !spans.length) {
+        node.textContent = fallback || "";
+        return;
+      }
+      spans.forEach((span) => {
+        const piece = span.kind === "change" ? document.createElement("mark") : document.createElement("span");
+        piece.textContent = span.text;
+        node.appendChild(piece);
+      });
+    }
+
+    function renderResult(payload, file) {
       const card = document.createElement("article");
       card.className = "result";
+      const title = document.createElement("h2");
+      title.textContent = payload.filename || (file ? file.name : "Clip");
+      card.appendChild(title);
+      addPlayer(card, file);
       if (payload.error) {
-        card.innerHTML = `<h2></h2><p class="error-text"></p>`;
-        card.querySelector("h2").textContent = payload.filename;
-        card.querySelector("p").textContent = payload.error;
+        const message = document.createElement("p");
+        message.className = "error-text";
+        message.textContent = payload.error;
+        card.appendChild(message);
         results.appendChild(card);
         return;
       }
-      const score = payload.reference
+      if (payload.decoder) title.textContent += " · " + payload.decoder.toUpperCase();
+      const score = document.createElement("p");
+      score.className = "score";
+      score.textContent = payload.reference
         ? `Character error ${percent(payload.character_error_rate)} · Word error ${percent(payload.word_error_rate)}`
         : "No reference text, so this result is the transcription only.";
-      card.innerHTML = `
-        <h2></h2>
-        <p class="score"></p>
-        <h3>Transcription</h3>
-        <div class="malayalam hypothesis"></div>
-        <h3 class="reference-label">Reference</h3>
-        <div class="malayalam reference"></div>
-      `;
-      card.querySelector("h2").textContent = payload.filename + " · " + payload.decoder.toUpperCase();
-      card.querySelector(".score").textContent = score;
-      card.querySelector(".hypothesis").textContent = payload.hypothesis || "No words were recognized.";
+      card.appendChild(score);
+      if (payload.diff) {
+        const legend = document.createElement("p");
+        legend.className = "legend";
+        legend.textContent = "Highlighted characters differ.";
+        card.appendChild(legend);
+      }
+      const transcriptionLabel = document.createElement("h3");
+      transcriptionLabel.textContent = "Transcription";
+      const transcription = document.createElement("div");
+      transcription.className = "malayalam hypothesis";
+      fillDiff(
+        transcription,
+        payload.diff && payload.diff.hypothesis,
+        payload.hypothesis || "No words were recognized.",
+      );
+      card.appendChild(transcriptionLabel);
+      card.appendChild(transcription);
       if (payload.reference) {
-        card.querySelector(".reference").textContent = payload.reference;
-      } else {
-        card.querySelector(".reference-label").hidden = true;
-        card.querySelector(".reference").hidden = true;
+        const referenceLabel = document.createElement("h3");
+        referenceLabel.textContent = "Reference";
+        const reference = document.createElement("div");
+        reference.className = "malayalam reference";
+        fillDiff(reference, payload.diff && payload.diff.reference, payload.reference);
+        card.appendChild(referenceLabel);
+        card.appendChild(reference);
       }
       results.appendChild(card);
     }
@@ -185,6 +243,7 @@
       }
 
       runButton.disabled = true;
+      forgetClips();
       results.replaceChildren();
       summary.hidden = true;
       const decoder = document.getElementById("decoder").value;
@@ -204,10 +263,10 @@
             const detail = payload.detail;
             throw new Error(typeof detail === "string" ? detail : "Evaluation failed.");
           }
-          renderResult(payload);
+          renderResult(payload, job.file);
           if (payload.reference) scored.push(payload.character_error_rate);
         } catch (error) {
-          renderResult({ filename: job.file.name, error: error.message });
+          renderResult({ filename: job.file.name, error: error.message }, job.file);
         }
       }
       if (scored.length) {

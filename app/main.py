@@ -204,6 +204,72 @@ def error_rate(reference: str, hypothesis: str, by_word: bool) -> float | None:
     return round(levenshtein(ref_units, hyp_units) / len(ref_units), 4)
 
 
+def _align(left: list, right: list) -> list[tuple[str, str, str]]:
+    rows = len(left) + 1
+    cols = len(right) + 1
+    costs = [[0] * cols for _ in range(rows)]
+    for i in range(1, rows):
+        costs[i][0] = i
+    for j in range(1, cols):
+        costs[0][j] = j
+    for i in range(1, rows):
+        for j in range(1, cols):
+            change = 0 if left[i - 1] == right[j - 1] else 1
+            costs[i][j] = min(
+                costs[i - 1][j] + 1,
+                costs[i][j - 1] + 1,
+                costs[i - 1][j - 1] + change,
+            )
+
+    ops = []
+    i, j = len(left), len(right)
+    while i > 0 or j > 0:
+        if i > 0 and j > 0 and costs[i][j] == costs[i - 1][j - 1] and left[i - 1] == right[j - 1]:
+            ops.append(("equal", left[i - 1], right[j - 1]))
+            i, j = i - 1, j - 1
+        elif i > 0 and j > 0 and costs[i][j] == costs[i - 1][j - 1] + 1:
+            ops.append(("replace", left[i - 1], right[j - 1]))
+            i, j = i - 1, j - 1
+        elif i > 0 and costs[i][j] == costs[i - 1][j] + 1:
+            ops.append(("delete", left[i - 1], ""))
+            i -= 1
+        else:
+            ops.append(("insert", "", right[j - 1]))
+            j -= 1
+    ops.reverse()
+    return ops
+
+
+def _append_span(spans: list[dict], kind: str, text: str) -> None:
+    if not text:
+        return
+    if spans and spans[-1]["kind"] == kind:
+        spans[-1]["text"] += text
+        return
+    spans.append({"kind": kind, "text": text})
+
+
+def diff_spans(reference: str, hypothesis: str) -> dict | None:
+    ref_text = normalize_text(reference)
+    if not ref_text:
+        return None
+    hyp_text = normalize_text(hypothesis)
+    reference_spans: list[dict] = []
+    hypothesis_spans: list[dict] = []
+    for op, ref_char, hyp_char in _align(list(ref_text), list(hyp_text)):
+        if op == "equal":
+            _append_span(reference_spans, "equal", ref_char)
+            _append_span(hypothesis_spans, "equal", hyp_char)
+        elif op == "replace":
+            _append_span(reference_spans, "change", ref_char)
+            _append_span(hypothesis_spans, "change", hyp_char)
+        elif op == "delete":
+            _append_span(reference_spans, "change", ref_char)
+        else:
+            _append_span(hypothesis_spans, "change", hyp_char)
+    return {"reference": reference_spans, "hypothesis": hypothesis_spans}
+
+
 def transcription_error(exc: Exception) -> str:
     message = str(exc).strip() or exc.__class__.__name__
     if len(message) > 300:
@@ -292,4 +358,5 @@ async def evaluate_upload(
         "reference": reference.strip(),
         "character_error_rate": error_rate(reference, hypothesis, by_word=False),
         "word_error_rate": error_rate(reference, hypothesis, by_word=True),
+        "diff": diff_spans(reference, hypothesis),
     }

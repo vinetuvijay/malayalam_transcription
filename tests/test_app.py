@@ -122,6 +122,22 @@ def test_character_error_rate_counts_a_substitution():
     assert main.error_rate("ഹലോ", "ഹലാ", by_word=False) == 0.3333
 
 
+def test_diff_marks_only_the_changed_characters():
+    diff = main.diff_spans("മറ്റ്", "മറ്റു")
+    assert diff["reference"] == [
+        {"kind": "equal", "text": "മറ്റ"},
+        {"kind": "change", "text": "്"},
+    ]
+    assert diff["hypothesis"] == [
+        {"kind": "equal", "text": "മറ്റ"},
+        {"kind": "change", "text": "ു"},
+    ]
+
+
+def test_diff_is_empty_without_a_reference():
+    assert main.diff_spans("  ", "ഹലോ") is None
+
+
 def test_error_rate_without_a_reference_is_empty():
     assert main.error_rate("   ", "ഹലോ", by_word=False) is None
     assert main.error_rate("", "ഹലോ", by_word=True) is None
@@ -154,6 +170,8 @@ def test_evaluate_returns_malayalam_and_the_error_rate(client, monkeypatch):
     assert body["reference"] == "ഹലോ"
     assert body["character_error_rate"] == 1.3333
     assert body["word_error_rate"] == 1.0
+    assert body["diff"]["reference"][-1]["kind"] == "equal"
+    assert any(span["kind"] == "change" for span in body["diff"]["hypothesis"])
 
 
 def test_gated_download_error_mentions_the_token():

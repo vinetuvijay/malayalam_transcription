@@ -26,7 +26,7 @@ Audio is converted to 16 kHz mono before inference. Uploads are limited to 100 M
 
 ## Evaluation
 
-Open http://localhost:8000/evaluate. Add one or more clips and, when you have it, paste the Malayalam that should be written. Each result shows the transcription. A reference also produces character and word error rates.
+Open http://localhost:8000/evaluate. Add one or more clips and, when you have it, paste the Malayalam that should be written. Each result plays the clip and shows the transcription. Characters that differ from the reference are highlighted, and the card shows character and word error rates.
 
 Google FLEURS already pairs each Malayalam recording with its transcript. This saves the first 20 test clips, the normalized transcript, and the original punctuated sentence:
 
