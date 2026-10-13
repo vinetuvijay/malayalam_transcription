@@ -12,6 +12,9 @@ MODEL_ID = "ai4bharat/indic-conformer-600m-multilingual"
 DEFAULT_LANGUAGE = os.environ.get("LANGUAGE", "ml")
 DEFAULT_DECODER = os.environ.get("DECODER", "rnnt")
 MAX_BYTES = 100 * 1024 * 1024
+SAMPLE_RATE = 16000
+CHUNK_SECONDS = 60
+MIN_CHUNK_SAMPLES = SAMPLE_RATE // 2
 TEMPLATE = Path(__file__).parent / "templates" / "index.html"
 LANGUAGES = {
     "as",
@@ -116,7 +119,7 @@ def to_16k_mono(src: Path):
             ["ffmpeg", "-y", "-i", str(src), "-ac", "1", "-ar", "16000", str(dst)],
             check=True,
             capture_output=True,
-            timeout=120,
+            timeout=600,
         )
     except subprocess.TimeoutExpired as exc:
         raise HTTPException(status_code=400, detail="Audio conversion timed out.") from exc
@@ -138,13 +141,40 @@ def to_16k_mono(src: Path):
     return torch.mean(wav, dim=0, keepdim=True)
 
 
+def chunk_ranges(total_samples: int, sample_rate: int = SAMPLE_RATE, chunk_seconds: int = CHUNK_SECONDS) -> list[tuple[int, int]]:
+    if total_samples <= 0:
+        return []
+    chunk = sample_rate * chunk_seconds
+    ranges = []
+    start = 0
+    while start < total_samples:
+        end = min(start + chunk, total_samples)
+        ranges.append((start, end))
+        start = end
+    if len(ranges) > 1:
+        ranges = [(start, end) for start, end in ranges if end - start >= MIN_CHUNK_SAMPLES]
+    return ranges
+
+
 def transcribe_wav(wav, language: str, decoder: str) -> str:
     import torch
 
     model = state["model"]
+    parts = []
     with infer_lock:
         with torch.inference_mode():
-            return as_text(model(wav, language, decoder))
+            for start, end in chunk_ranges(wav.shape[-1]):
+                text = as_text(model(wav[:, start:end], language, decoder)).strip()
+                if text:
+                    parts.append(text)
+    return " ".join(parts)
+
+
+def transcription_error(exc: Exception) -> str:
+    message = str(exc).strip() or exc.__class__.__name__
+    if len(message) > 300:
+        message = message[:300] + "…"
+    return f"Transcription failed: {message}"
 
 
 @app.get("/health")
@@ -191,6 +221,11 @@ async def transcribe_upload(
         src = Path(tmp) / f"input{suffix}"
         src.write_bytes(payload)
         wav = to_16k_mono(src)
-        text = transcribe_wav(wav, language, decoder)
+        try:
+            text = transcribe_wav(wav, language, decoder)
+        except HTTPException:
+            raise
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=transcription_error(exc)) from exc
 
     return {"text": text, "language": language, "decoder": decoder}

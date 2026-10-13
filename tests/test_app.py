@@ -77,6 +77,43 @@ def test_upload_limit_is_100_mb():
     assert main.MAX_BYTES == 100 * 1024 * 1024
 
 
+def test_chunk_ranges_split_a_long_recording():
+    ranges = main.chunk_ranges(16000 * 150)
+    assert ranges == [(0, 16000 * 60), (16000 * 60, 16000 * 120), (16000 * 120, 16000 * 150)]
+
+
+def test_chunk_ranges_keep_a_short_recording_whole():
+    assert main.chunk_ranges(16000 * 20) == [(0, 16000 * 20)]
+
+
+def test_chunk_ranges_drop_a_tiny_tail():
+    ranges = main.chunk_ranges(16000 * 60 + 1000)
+    assert ranges == [(0, 16000 * 60)]
+
+
+class _FakeWav:
+    def __init__(self, total):
+        self.shape = (1, total)
+
+    def __getitem__(self, item):
+        span = item[1]
+        return _FakeWav(span.stop - span.start)
+
+
+def test_transcribe_wav_joins_chunk_text(monkeypatch):
+    pytest.importorskip("torch")
+    seen = []
+
+    def fake_model(wav, language, decoder):
+        seen.append((wav.shape[-1], language, decoder))
+        return f"ഭാഗം{len(seen)}"
+
+    main.state["model"] = fake_model
+    text = main.transcribe_wav(_FakeWav(16000 * 90), "ml", "rnnt")
+    assert seen == [(16000 * 60, "ml", "rnnt"), (16000 * 30, "ml", "rnnt")]
+    assert text == "ഭാഗം1 ഭാഗം2"
+
+
 def test_gated_download_error_mentions_the_token():
     message = main.friendly_load_error(RuntimeError("401 Unauthorized"))
     assert "HF_TOKEN" in message
