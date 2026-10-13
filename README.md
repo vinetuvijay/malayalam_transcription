@@ -27,3 +27,12 @@ Audio is converted to 16 kHz mono before inference. Uploads are limited to 100 M
 ## Evaluation
 
 Open http://localhost:8000/evaluate. Add one or more clips and, when you have it, paste the Malayalam that should be written. Each result shows the transcription. A reference also produces character and word error rates.
+
+Google FLEURS already pairs each Malayalam recording with its transcript. This saves the first 20 test clips, the normalized transcript, and the original punctuated sentence:
+
+```bash
+pip install datasets soundfile
+python download_eval.py --limit 20
+```
+
+`data/fleurs-ml/0000.wav` is the audio. The same row in `data/fleurs-ml/references.tsv` is the Malayalam to paste into **Expected Malayalam**. FLEURS is published under CC BY 4.0.
