@@ -127,13 +127,16 @@
 
     let recorder = null;
     let chunks = [];
+    const MAX_BYTES = 100 * 1024 * 1024;
     let modelReady = false;
     let transcribing = false;
     let recording = false;
+    let holdStatus = false;
 
-    function setStatus(message, kind) {
+    function setStatus(message, kind, hold = false) {
       status.textContent = message || "";
       status.className = "status" + (kind ? " " + kind : "");
+      holdStatus = hold;
     }
 
     function refreshButtons() {
@@ -142,7 +145,12 @@
     }
 
     function showFile(file) {
-      fileLabel.textContent = file ? file.name : "Drop a file here, or choose one.";
+      if (!file) {
+        fileLabel.textContent = "Drop a file here, or choose one.";
+        return;
+      }
+      const megabytes = (file.size / (1024 * 1024)).toFixed(1);
+      fileLabel.textContent = file.name + " (" + megabytes + " MB)";
     }
 
     async function pollHealth() {
@@ -167,7 +175,10 @@
         nextKind = "error";
       }
       modelReady = nextReady;
-      if (!transcribing && !recording) setStatus(nextMessage, nextKind);
+      const modelFailed = nextKind === "error" && !nextReady;
+      if (modelFailed || (!transcribing && !recording && !holdStatus)) {
+        setStatus(nextMessage, nextKind);
+      }
       refreshButtons();
     }
 
@@ -222,7 +233,7 @@
         setStatus("Recording…");
       } catch (error) {
         recording = false;
-        setStatus("Microphone access was blocked.", "error");
+        setStatus("Microphone access was blocked.", "error", true);
       }
     });
 
@@ -230,7 +241,13 @@
       event.preventDefault();
       const file = audioInput.files[0];
       if (!file) {
-        setStatus("Choose or record audio first.", "error");
+        setStatus("Choose or record audio first.", "error", true);
+        text.textContent = "Choose or record audio first.";
+        return;
+      }
+      if (file.size > MAX_BYTES) {
+        setStatus("The file is larger than 100 MB.", "error", true);
+        text.textContent = "The file is larger than 100 MB.";
         return;
       }
       const body = new FormData();
@@ -248,11 +265,17 @@
           const detail = payload.detail;
           throw new Error(typeof detail === "string" ? detail : "Transcription failed.");
         }
-        text.textContent = payload.text;
-        setStatus("Model is ready.", "ready");
+        const transcript = (payload.text || "").trim();
+        if (!transcript) {
+          text.textContent = "No words were recognized. Try the RNNT decoder, or use a short clip of spoken Malayalam.";
+          setStatus("No words were recognized.", "error", true);
+        } else {
+          text.textContent = payload.text;
+          setStatus("Transcription finished.", "ready", true);
+        }
       } catch (error) {
-        text.textContent = "";
-        setStatus(error.message, "error");
+        text.textContent = error.message;
+        setStatus(error.message, "error", true);
       } finally {
         transcribing = false;
         refreshButtons();

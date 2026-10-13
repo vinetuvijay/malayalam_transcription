@@ -73,6 +73,10 @@ def test_transcribe_rejects_an_unknown_decoder(client):
     assert response.status_code == 400
 
 
+def test_upload_limit_is_100_mb():
+    assert main.MAX_BYTES == 100 * 1024 * 1024
+
+
 def test_gated_download_error_mentions_the_token():
     message = main.friendly_load_error(RuntimeError("401 Unauthorized"))
     assert "HF_TOKEN" in message

@@ -11,7 +11,7 @@ from fastapi.responses import FileResponse
 MODEL_ID = "ai4bharat/indic-conformer-600m-multilingual"
 DEFAULT_LANGUAGE = os.environ.get("LANGUAGE", "ml")
 DEFAULT_DECODER = os.environ.get("DECODER", "rnnt")
-MAX_BYTES = 25 * 1024 * 1024
+MAX_BYTES = 100 * 1024 * 1024
 TEMPLATE = Path(__file__).parent / "templates" / "index.html"
 LANGUAGES = {
     "as",
@@ -180,7 +180,8 @@ async def transcribe_upload(
     if not payload:
         raise HTTPException(status_code=400, detail="The audio file is empty.")
     if len(payload) > MAX_BYTES:
-        raise HTTPException(status_code=400, detail="The file is larger than 25 MB.")
+        limit_mb = MAX_BYTES // (1024 * 1024)
+        raise HTTPException(status_code=400, detail=f"The file is larger than {limit_mb} MB.")
 
     suffix = Path(audio.filename or "audio.wav").suffix.lower()
     if suffix not in AUDIO_SUFFIXES:
