@@ -1,0 +1,223 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Malayalam evaluation</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --ink: #1c1917;
+      --muted: #57534e;
+      --line: #e7e5e4;
+      --paper: #fafaf9;
+      --accent: #9a3412;
+      --ok: #166534;
+      --warn: #9a3412;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: "Segoe UI", sans-serif;
+      color: var(--ink);
+      background: var(--paper);
+    }
+    main { max-width: 52rem; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    h1 { font-size: 1.75rem; margin-bottom: 0.25rem; }
+    .lede { color: var(--muted); margin-top: 0; }
+    nav { margin: 0 0 1rem; }
+    nav a { color: var(--accent); }
+    form, .case, .result, .summary {
+      background: white;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      padding: 1.25rem;
+    }
+    .case, .result, .summary { margin-top: 1rem; }
+    label { display: block; font-weight: 600; margin: 1rem 0 0.35rem; }
+    select, button, textarea, input[type="file"] { font: inherit; }
+    select, textarea {
+      width: 100%;
+      padding: 0.6rem 0.7rem;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: white;
+    }
+    textarea { min-height: 5.5rem; resize: vertical; }
+    .actions { display: flex; flex-wrap: wrap; gap: 0.75rem; margin-top: 1rem; }
+    button {
+      border: 0;
+      border-radius: 8px;
+      padding: 0.7rem 1rem;
+      cursor: pointer;
+      background: var(--accent);
+      color: white;
+    }
+    button.secondary { background: white; color: var(--ink); border: 1px solid var(--line); }
+    button:disabled {
+      background: #d6d3d1;
+      color: #78716c;
+      border-color: #d6d3d1;
+      cursor: not-allowed;
+    }
+    .status { color: var(--muted); min-height: 1.25rem; }
+    .status.error { color: var(--warn); }
+    .status.ready { color: var(--ok); }
+    .score { color: var(--muted); margin: 0.25rem 0 0.75rem; }
+    .malayalam { font-size: 1.25rem; line-height: 1.7; white-space: pre-wrap; }
+    .result h2, .result h3 { margin: 0 0 0.35rem; }
+    .result h2 { font-size: 1rem; }
+    .result h3 { margin-top: 0.9rem; font-size: 0.85rem; color: var(--muted); font-weight: 600; }
+    .error-text { color: var(--warn); }
+  </style>
+</head>
+<body>
+  <main>
+    <nav><a href="/">Transcription</a></nav>
+    <h1>Evaluation</h1>
+    <p class="lede">Run the Malayalam transcriber on one or more clips. Paste the expected text when you have it, and the page shows the transcription beside that reference.</p>
+
+    <form id="form">
+      <label for="decoder">Decoder</label>
+      <select id="decoder" name="decoder">
+        <option value="rnnt" selected>RNNT</option>
+        <option value="ctc">CTC</option>
+      </select>
+
+      <div id="cases"></div>
+
+      <div class="actions">
+        <button type="button" id="add" class="secondary">Add clip</button>
+        <button type="submit" id="run">Run evaluation</button>
+      </div>
+      <p class="status" id="status"></p>
+    </form>
+
+    <section id="summary" class="summary" hidden></section>
+    <section id="results" aria-live="polite"></section>
+  </main>
+
+  <script>
+    const form = document.getElementById("form");
+    const cases = document.getElementById("cases");
+    const addButton = document.getElementById("add");
+    const runButton = document.getElementById("run");
+    const status = document.getElementById("status");
+    const summary = document.getElementById("summary");
+    const results = document.getElementById("results");
+    const MAX_BYTES = 100 * 1024 * 1024;
+
+    function setStatus(message, kind) {
+      status.textContent = message || "";
+      status.className = "status" + (kind ? " " + kind : "");
+    }
+
+    function addCase() {
+      const row = document.createElement("div");
+      row.className = "case";
+      row.innerHTML = `
+        <label>Audio <input class="audio" type="file" accept="audio/*,.wav,.mp3,.m4a,.flac,.ogg,.webm"></label>
+        <label>Expected Malayalam <textarea class="reference" placeholder="Optional. Paste the words that should be written."></textarea></label>
+        <button type="button" class="secondary remove">Remove</button>
+      `;
+      row.querySelector(".remove").addEventListener("click", () => {
+        row.remove();
+        if (!cases.children.length) addCase();
+      });
+      cases.appendChild(row);
+    }
+
+    function percent(rate) {
+      if (rate === null || rate === undefined) return "";
+      return (rate * 100).toFixed(1) + "%";
+    }
+
+    function renderResult(payload) {
+      const card = document.createElement("article");
+      card.className = "result";
+      if (payload.error) {
+        card.innerHTML = `<h2></h2><p class="error-text"></p>`;
+        card.querySelector("h2").textContent = payload.filename;
+        card.querySelector("p").textContent = payload.error;
+        results.appendChild(card);
+        return;
+      }
+      const score = payload.reference
+        ? `Character error ${percent(payload.character_error_rate)} · Word error ${percent(payload.word_error_rate)}`
+        : "No reference text, so this result is the transcription only.";
+      card.innerHTML = `
+        <h2></h2>
+        <p class="score"></p>
+        <h3>Transcription</h3>
+        <div class="malayalam hypothesis"></div>
+        <h3 class="reference-label">Reference</h3>
+        <div class="malayalam reference"></div>
+      `;
+      card.querySelector("h2").textContent = payload.filename + " · " + payload.decoder.toUpperCase();
+      card.querySelector(".score").textContent = score;
+      card.querySelector(".hypothesis").textContent = payload.hypothesis || "No words were recognized.";
+      if (payload.reference) {
+        card.querySelector(".reference").textContent = payload.reference;
+      } else {
+        card.querySelector(".reference-label").hidden = true;
+        card.querySelector(".reference").hidden = true;
+      }
+      results.appendChild(card);
+    }
+
+    addButton.addEventListener("click", addCase);
+    addCase();
+
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const rows = [...cases.querySelectorAll(".case")];
+      const jobs = rows.map((row) => ({
+        file: row.querySelector(".audio").files[0],
+        reference: row.querySelector(".reference").value.trim(),
+      })).filter((job) => job.file);
+      if (!jobs.length) {
+        setStatus("Add an audio clip first.", "error");
+        return;
+      }
+      if (jobs.some((job) => job.file.size > MAX_BYTES)) {
+        setStatus("Each clip must be 100 MB or smaller.", "error");
+        return;
+      }
+
+      runButton.disabled = true;
+      results.replaceChildren();
+      summary.hidden = true;
+      const decoder = document.getElementById("decoder").value;
+      const scored = [];
+      for (let index = 0; index < jobs.length; index += 1) {
+        const job = jobs[index];
+        setStatus(`Transcribing ${index + 1} of ${jobs.length}: ${job.file.name}`);
+        const body = new FormData();
+        body.append("audio", job.file);
+        body.append("reference", job.reference);
+        body.append("decoder", decoder);
+        body.append("language", "ml");
+        try {
+          const response = await fetch("/evaluate", { method: "POST", body });
+          const payload = await response.json();
+          if (!response.ok) {
+            const detail = payload.detail;
+            throw new Error(typeof detail === "string" ? detail : "Evaluation failed.");
+          }
+          renderResult(payload);
+          if (payload.reference) scored.push(payload.character_error_rate);
+        } catch (error) {
+          renderResult({ filename: job.file.name, error: error.message });
+        }
+      }
+      if (scored.length) {
+        const average = scored.reduce((sum, rate) => sum + rate, 0) / scored.length;
+        summary.hidden = false;
+        summary.textContent = `${jobs.length} clip${jobs.length === 1 ? "" : "s"}. Average character error ${percent(average)}.`;
+      }
+      setStatus("Evaluation finished.", "ready");
+      runButton.disabled = false;
+    });
+  </script>
+</body>
+</html>

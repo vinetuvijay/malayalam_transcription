@@ -16,6 +16,7 @@ SAMPLE_RATE = 16000
 CHUNK_SECONDS = 60
 MIN_CHUNK_SAMPLES = SAMPLE_RATE // 2
 TEMPLATE = Path(__file__).parent / "templates" / "index.html"
+EVALUATE_TEMPLATE = Path(__file__).parent / "templates" / "evaluate.html"
 LANGUAGES = {
     "as",
     "bn",
@@ -170,6 +171,39 @@ def transcribe_wav(wav, language: str, decoder: str) -> str:
     return " ".join(parts)
 
 
+def normalize_text(text: str) -> str:
+    return " ".join(text.replace("\u200c", "").replace("\u200d", "").split())
+
+
+def levenshtein(left: list, right: list) -> int:
+    if left == right:
+        return 0
+    if not left:
+        return len(right)
+    if not right:
+        return len(left)
+    previous = list(range(len(right) + 1))
+    for i, item in enumerate(left, start=1):
+        current = [i]
+        for j, other in enumerate(right, start=1):
+            cost = 0 if item == other else 1
+            current.append(min(current[-1] + 1, previous[j] + 1, previous[j - 1] + cost))
+        previous = current
+    return previous[-1]
+
+
+def error_rate(reference: str, hypothesis: str, by_word: bool) -> float | None:
+    ref_text = normalize_text(reference)
+    hyp_text = normalize_text(hypothesis)
+    if not ref_text:
+        return None
+    ref_units = ref_text.split() if by_word else list(ref_text)
+    hyp_units = hyp_text.split() if by_word else list(hyp_text)
+    if not ref_units:
+        return None
+    return round(levenshtein(ref_units, hyp_units) / len(ref_units), 4)
+
+
 def transcription_error(exc: Exception) -> str:
     message = str(exc).strip() or exc.__class__.__name__
     if len(message) > 300:
@@ -186,17 +220,7 @@ def health() -> dict:
     return {"status": "ready", "model": MODEL_ID, "language": DEFAULT_LANGUAGE}
 
 
-@app.get("/")
-def index() -> FileResponse:
-    return FileResponse(TEMPLATE)
-
-
-@app.post("/transcribe")
-async def transcribe_upload(
-    audio: UploadFile = File(...),
-    language: str = Form(DEFAULT_LANGUAGE),
-    decoder: str = Form(DEFAULT_DECODER),
-) -> dict:
+def require_model(decoder: str, language: str) -> None:
     if decoder not in {"ctc", "rnnt"}:
         raise HTTPException(status_code=400, detail="Decoder must be ctc or rnnt.")
     if language not in LANGUAGES:
@@ -206,14 +230,15 @@ async def transcribe_upload(
     if state["loading"] or state["model"] is None:
         raise HTTPException(status_code=503, detail="The model is still downloading.")
 
-    payload = await audio.read()
+
+def transcribe_bytes(payload: bytes, filename: str, language: str, decoder: str) -> str:
     if not payload:
         raise HTTPException(status_code=400, detail="The audio file is empty.")
     if len(payload) > MAX_BYTES:
         limit_mb = MAX_BYTES // (1024 * 1024)
         raise HTTPException(status_code=400, detail=f"The file is larger than {limit_mb} MB.")
 
-    suffix = Path(audio.filename or "audio.wav").suffix.lower()
+    suffix = Path(filename or "audio.wav").suffix.lower()
     if suffix not in AUDIO_SUFFIXES:
         suffix = ".audio"
 
@@ -222,10 +247,49 @@ async def transcribe_upload(
         src.write_bytes(payload)
         wav = to_16k_mono(src)
         try:
-            text = transcribe_wav(wav, language, decoder)
+            return transcribe_wav(wav, language, decoder)
         except HTTPException:
             raise
         except Exception as exc:
             raise HTTPException(status_code=500, detail=transcription_error(exc)) from exc
 
+
+@app.get("/")
+def index() -> FileResponse:
+    return FileResponse(TEMPLATE)
+
+
+@app.get("/evaluate")
+def evaluate_page() -> FileResponse:
+    return FileResponse(EVALUATE_TEMPLATE)
+
+
+@app.post("/transcribe")
+async def transcribe_upload(
+    audio: UploadFile = File(...),
+    language: str = Form(DEFAULT_LANGUAGE),
+    decoder: str = Form(DEFAULT_DECODER),
+) -> dict:
+    require_model(decoder, language)
+    text = transcribe_bytes(await audio.read(), audio.filename or "audio.wav", language, decoder)
     return {"text": text, "language": language, "decoder": decoder}
+
+
+@app.post("/evaluate")
+async def evaluate_upload(
+    audio: UploadFile = File(...),
+    reference: str = Form(""),
+    language: str = Form(DEFAULT_LANGUAGE),
+    decoder: str = Form(DEFAULT_DECODER),
+) -> dict:
+    require_model(decoder, language)
+    hypothesis = transcribe_bytes(await audio.read(), audio.filename or "audio.wav", language, decoder)
+    return {
+        "filename": audio.filename or "audio.wav",
+        "language": language,
+        "decoder": decoder,
+        "hypothesis": hypothesis,
+        "reference": reference.strip(),
+        "character_error_rate": error_rate(reference, hypothesis, by_word=False),
+        "word_error_rate": error_rate(reference, hypothesis, by_word=True),
+    }

@@ -114,6 +114,48 @@ def test_transcribe_wav_joins_chunk_text(monkeypatch):
     assert text == "ഭാഗം1 ഭാഗം2"
 
 
+def test_character_error_rate_is_zero_for_a_match():
+    assert main.error_rate("നമസ്കാരം", "നമസ്കാരം", by_word=False) == 0
+
+
+def test_character_error_rate_counts_a_substitution():
+    assert main.error_rate("ഹലോ", "ഹലാ", by_word=False) == 0.3333
+
+
+def test_error_rate_without_a_reference_is_empty():
+    assert main.error_rate("   ", "ഹലോ", by_word=False) is None
+    assert main.error_rate("", "ഹലോ", by_word=True) is None
+
+
+def test_evaluate_page_shows_the_runner(client):
+    response = client.get("/evaluate")
+    assert response.status_code == 200
+    assert "Run evaluation" in response.text
+    assert "Expected Malayalam" in response.text
+
+
+def test_evaluate_returns_malayalam_and_the_error_rate(client, monkeypatch):
+    main.state["model"] = object()
+    main.state["loading"] = False
+    main.state["error"] = None
+    monkeypatch.setattr(main, "to_16k_mono", lambda src: object())
+    monkeypatch.setattr(main, "transcribe_wav", lambda wav, language, decoder: "ഹലോ ഹലോ")
+
+    response = client.post(
+        "/evaluate",
+        files={"audio": ("call.wav", b"RIFFxxxx", "audio/wav")},
+        data={"decoder": "rnnt", "language": "ml", "reference": "ഹലോ"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["filename"] == "call.wav"
+    assert body["hypothesis"] == "ഹലോ ഹലോ"
+    assert body["reference"] == "ഹലോ"
+    assert body["character_error_rate"] == 1.3333
+    assert body["word_error_rate"] == 1.0
+
+
 def test_gated_download_error_mentions_the_token():
     message = main.friendly_load_error(RuntimeError("401 Unauthorized"))
     assert "HF_TOKEN" in message

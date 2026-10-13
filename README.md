@@ -23,3 +23,7 @@ curl -F "audio=@sample.wav" -F "decoder=rnnt" -F "language=ml" http://localhost:
 Audio is converted to 16 kHz mono before inference. Uploads are limited to 100 MB. Recordings longer than one minute are split into 60-second pieces and the text is joined. RNNT is the default decoder; CTC is the faster option on CPU. Plan on several gigabytes of free RAM. A long recording can take several minutes to transcribe.
 
 `GET /health` reports `loading`, `ready`, or `error` while the model download finishes.
+
+## Evaluation
+
+Open http://localhost:8000/evaluate. Add one or more clips and, when you have it, paste the Malayalam that should be written. Each result shows the transcription. A reference also produces character and word error rates.
