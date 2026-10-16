@@ -6,6 +6,7 @@ services:
     environment:
       HF_HOME: /models
       HF_TOKEN: ${HF_TOKEN:-}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
       LANGUAGE: ml
       DECODER: rnnt
     volumes:

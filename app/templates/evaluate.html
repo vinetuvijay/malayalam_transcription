@@ -77,6 +77,7 @@
     .result h2 { font-size: 1rem; }
     .result h3 { margin-top: 0.9rem; font-size: 0.85rem; color: var(--muted); font-weight: 600; }
     .error-text { color: var(--warn); }
+    .note { color: var(--muted); font-size: 0.9rem; margin: 0.75rem 0 0; }
   </style>
 </head>
 <body>
@@ -86,11 +87,19 @@
     <p class="lede">Run the Malayalam transcriber on one or more clips. Paste the expected text when you have it. Differences are highlighted, and you can play the clip.</p>
 
     <form id="form">
-      <label for="decoder">Decoder</label>
-      <select id="decoder" name="decoder">
-        <option value="rnnt" selected>RNNT</option>
-        <option value="ctc">CTC</option>
+      <label for="model">Model</label>
+      <select id="model" name="model">
+        <option value="indic" selected>IndicConformer</option>
+        <option value="google">Google</option>
       </select>
+      <p class="note" id="google-note" hidden>The clip is sent to Google Gemini. A free key has a daily limit, and Google may use free-tier audio to improve its products.</p>
+      <div id="decoder-field">
+        <label for="decoder">Decoder</label>
+        <select id="decoder" name="decoder">
+          <option value="rnnt" selected>RNNT</option>
+          <option value="ctc">CTC</option>
+        </select>
+      </div>
 
       <div id="cases"></div>
 
@@ -187,7 +196,8 @@
         results.appendChild(card);
         return;
       }
-      if (payload.decoder) title.textContent += " · " + payload.decoder.toUpperCase();
+      if (payload.model === "google") title.textContent += " · Google";
+      else if (payload.decoder) title.textContent += " · " + payload.decoder.toUpperCase();
       const score = document.createElement("p");
       score.className = "score";
       score.textContent = payload.reference
@@ -223,8 +233,18 @@
       results.appendChild(card);
     }
 
+    const modelSelect = document.getElementById("model");
+
+    function applyEngine() {
+      const google = modelSelect.value === "google";
+      document.getElementById("decoder-field").hidden = google;
+      document.getElementById("google-note").hidden = !google;
+    }
+
     addButton.addEventListener("click", addCase);
+    modelSelect.addEventListener("change", applyEngine);
     addCase();
+    applyEngine();
 
     form.addEventListener("submit", async (event) => {
       event.preventDefault();
@@ -246,6 +266,7 @@
       forgetClips();
       results.replaceChildren();
       summary.hidden = true;
+      const model = modelSelect.value;
       const decoder = document.getElementById("decoder").value;
       const scored = [];
       for (let index = 0; index < jobs.length; index += 1) {
@@ -254,6 +275,7 @@
         const body = new FormData();
         body.append("audio", job.file);
         body.append("reference", job.reference);
+        body.append("model", model);
         body.append("decoder", decoder);
         body.append("language", "ml");
         try {

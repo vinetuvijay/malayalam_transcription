@@ -1,6 +1,6 @@
 # Malayalam transcription
 
-Local speech-to-text for Malayalam using AI4Bharat IndicConformer (`ai4bharat/indic-conformer-600m-multilingual`). The app serves a browser page where you can record or upload audio, then returns the transcription from the RNNT or CTC decoder.
+Local speech-to-text for Malayalam. IndicConformer (`ai4bharat/indic-conformer-600m-multilingual`) runs on this machine. Google Gemini 3.5 Transcribe is the other choice and sends the recording to Google.
 
 ## Run
 
@@ -20,9 +20,11 @@ Open http://localhost:8000. The first start downloads the model into a Docker vo
 curl -F "audio=@sample.wav" -F "decoder=rnnt" -F "language=ml" http://localhost:8000/transcribe
 ```
 
-Audio is converted to 16 kHz mono before inference. Uploads are limited to 100 MB. Recordings longer than one minute are split into 60-second pieces and the text is joined. RNNT is the default decoder; CTC is the faster option on CPU. Plan on several gigabytes of free RAM. A long recording can take several minutes to transcribe.
+Audio is converted to 16 kHz mono before inference. Uploads are limited to 100 MB. With IndicConformer, recordings longer than one minute are split into 60-second pieces and the text is joined. RNNT is the default decoder; CTC is the faster option on CPU. Plan on several gigabytes of free RAM. A long recording can take several minutes to transcribe.
 
-`GET /health` reports `loading`, `ready`, or `error` while the model download finishes.
+Choose **Google** on the page to use Gemini 3.5 Transcribe (`gemini-3.5-transcribe`) with Malayalam (`ml-IN`). Create a free key in [Google AI Studio](https://aistudio.google.com/apikey) and set `GEMINI_API_KEY` in `.env`. The free tier has a daily limit. On that tier Google may use the audio to improve its products. Google accepts up to one hour per clip. IndicConformer does not need to finish downloading before a Google transcription.
+
+`GET /health` reports `loading`, `ready`, or `error` while the IndicConformer download finishes, and `google` is `ready` or `missing`.
 
 ## Evaluation
 

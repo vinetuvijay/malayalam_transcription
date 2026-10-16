@@ -1,7 +1,12 @@
+import json
 import os
 import subprocess
 import tempfile
 import threading
+import time
+import urllib.error
+import urllib.request
+import wave
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -9,8 +14,14 @@ from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 
 MODEL_ID = "ai4bharat/indic-conformer-600m-multilingual"
+GEMINI_MODEL = "gemini-3.5-transcribe"
+GEMINI_API = "https://generativelanguage.googleapis.com"
 DEFAULT_LANGUAGE = os.environ.get("LANGUAGE", "ml")
 DEFAULT_DECODER = os.environ.get("DECODER", "rnnt")
+DEFAULT_ENGINE = "indic"
+ENGINES = {"indic", "google"}
+GEMINI_LANGUAGES = {"ml": "ml-IN"}
+GOOGLE_MAX_SECONDS = 60 * 60
 MAX_BYTES = 100 * 1024 * 1024
 SAMPLE_RATE = 16000
 CHUNK_SECONDS = 60
@@ -50,6 +61,10 @@ infer_lock = threading.Lock()
 def huggingface_token() -> str | None:
     token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
     return token or None
+
+
+def gemini_api_key() -> str:
+    return os.environ.get("GEMINI_API_KEY", "").strip()
 
 
 def friendly_load_error(exc: Exception) -> str:
@@ -110,10 +125,7 @@ def as_text(value) -> str:
     return str(value)
 
 
-def to_16k_mono(src: Path):
-    import soundfile as sf
-    import torch
-
+def export_16k_wav(src: Path) -> Path:
     dst = src.with_suffix(".16k.wav")
     try:
         subprocess.run(
@@ -128,7 +140,14 @@ def to_16k_mono(src: Path):
         stderr = exc.stderr.decode("utf-8", "replace").strip().splitlines()
         detail = stderr[-1] if stderr else "Could not read that audio file."
         raise HTTPException(status_code=400, detail=detail) from exc
+    return dst
 
+
+def to_16k_mono(src: Path):
+    import soundfile as sf
+    import torch
+
+    dst = export_16k_wav(src)
     audio, sample_rate = sf.read(dst, dtype="float32", always_2d=True)
     wav = torch.from_numpy(audio.T)
     if sample_rate != 16000:
@@ -270,6 +289,165 @@ def diff_spans(reference: str, hypothesis: str) -> dict | None:
     return {"reference": reference_spans, "hypothesis": hypothesis_spans}
 
 
+def gemini_failure(status: int, body: bytes) -> HTTPException:
+    message = ""
+    try:
+        message = json.loads(body.decode()).get("error", {}).get("message", "")
+    except (UnicodeDecodeError, json.JSONDecodeError, AttributeError):
+        message = ""
+    if status in {401, 403}:
+        return HTTPException(
+            status_code=503,
+            detail="Google rejected GEMINI_API_KEY. Create a key in Google AI Studio and put it in .env.",
+        )
+    if status == 429:
+        return HTTPException(
+            status_code=429,
+            detail="The Google free limit for this model is used up. Wait until it resets, or check the quota in AI Studio.",
+        )
+    if message:
+        return HTTPException(status_code=502, detail=f"Google transcription failed: {message[:300]}")
+    return HTTPException(status_code=502, detail="Google transcription failed.")
+
+
+def gemini_transcript(payload: dict) -> str:
+    parts = []
+    for candidate in payload.get("candidates") or []:
+        content = candidate.get("content") or {}
+        for part in content.get("parts") or []:
+            text = part.get("text")
+            if isinstance(text, str) and text.strip():
+                parts.append(text.strip())
+    return " ".join(parts)
+
+
+def _gemini_call(url: str, data: bytes | None, headers: dict, method: str, timeout: int) -> dict:
+    request = urllib.request.Request(url, data=data, headers=headers, method=method)
+    request.add_header("x-goog-api-key", gemini_api_key())
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            raw = response.read()
+    except urllib.error.HTTPError as exc:
+        raise gemini_failure(exc.code, exc.read()) from exc
+    except urllib.error.URLError as exc:
+        raise HTTPException(status_code=502, detail="Could not reach Google.") from exc
+    if not raw:
+        return {}
+    return json.loads(raw.decode())
+
+
+def _gemini_upload(wav_path: Path) -> dict:
+    audio = wav_path.read_bytes()
+    start = urllib.request.Request(
+        f"{GEMINI_API}/upload/v1beta/files",
+        data=json.dumps({"file": {"display_name": wav_path.name}}).encode(),
+        headers={
+            "X-Goog-Upload-Protocol": "resumable",
+            "X-Goog-Upload-Command": "start",
+            "X-Goog-Upload-Header-Content-Length": str(len(audio)),
+            "X-Goog-Upload-Header-Content-Type": "audio/wav",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    start.add_header("x-goog-api-key", gemini_api_key())
+    try:
+        with urllib.request.urlopen(start, timeout=60) as response:
+            upload_url = response.headers.get("x-goog-upload-url")
+    except urllib.error.HTTPError as exc:
+        raise gemini_failure(exc.code, exc.read()) from exc
+    except urllib.error.URLError as exc:
+        raise HTTPException(status_code=502, detail="Could not reach Google.") from exc
+    if not upload_url:
+        raise HTTPException(status_code=502, detail="Google did not accept the audio.")
+    payload = _gemini_call(
+        upload_url.strip(),
+        audio,
+        {
+            "Content-Length": str(len(audio)),
+            "X-Goog-Upload-Offset": "0",
+            "X-Goog-Upload-Command": "upload, finalize",
+        },
+        "POST",
+        600,
+    )
+    uploaded = payload.get("file") or payload
+    if not uploaded.get("uri") or not uploaded.get("name"):
+        raise HTTPException(status_code=502, detail="Google did not accept the audio.")
+    return uploaded
+
+
+def _wait_for_gemini_file(uploaded: dict) -> None:
+    name = uploaded["name"]
+    state = uploaded.get("state") or "ACTIVE"
+    for _ in range(30):
+        if state == "ACTIVE":
+            return
+        if state == "FAILED":
+            raise HTTPException(status_code=502, detail="Google could not read that audio.")
+        time.sleep(1)
+        info = _gemini_call(f"{GEMINI_API}/v1beta/{name}", None, {}, "GET", 30)
+        state = (info.get("state") or info.get("file", {}).get("state") or "ACTIVE")
+    raise HTTPException(status_code=504, detail="Google took too long to accept the audio.")
+
+
+def _gemini_delete(name: str) -> None:
+    if not name:
+        return
+    try:
+        _gemini_call(f"{GEMINI_API}/v1beta/{name}", None, {}, "DELETE", 30)
+    except HTTPException:
+        return
+
+
+def wav_seconds(path: Path) -> float:
+    try:
+        with wave.open(str(path), "rb") as handle:
+            rate = handle.getframerate()
+            frames = handle.getnframes()
+    except (wave.Error, EOFError) as exc:
+        raise HTTPException(status_code=400, detail="Could not read that audio file.") from exc
+    if rate <= 0:
+        raise HTTPException(status_code=400, detail="Could not read that audio file.")
+    return frames / rate
+
+
+def transcribe_gemini(wav_path: Path, language: str) -> str:
+    if wav_seconds(wav_path) > GOOGLE_MAX_SECONDS:
+        raise HTTPException(status_code=400, detail="Google accepts up to one hour of audio.")
+    uploaded = _gemini_upload(wav_path)
+    try:
+        _wait_for_gemini_file(uploaded)
+        payload = _gemini_call(
+            f"{GEMINI_API}/v1beta/models/{GEMINI_MODEL}:generateContent",
+            json.dumps(
+                {
+                    "contents": [
+                        {
+                            "parts": [
+                                {
+                                    "fileData": {
+                                        "mimeType": uploaded.get("mimeType") or "audio/wav",
+                                        "fileUri": uploaded["uri"],
+                                    }
+                                }
+                            ]
+                        }
+                    ],
+                    "generationConfig": {
+                        "audioTranscriptionConfig": {"languageCodes": [GEMINI_LANGUAGES[language]]}
+                    },
+                }
+            ).encode(),
+            {"Content-Type": "application/json"},
+            "POST",
+            600,
+        )
+    finally:
+        _gemini_delete(uploaded.get("name", ""))
+    return gemini_transcript(payload)
+
+
 def transcription_error(exc: Exception) -> str:
     message = str(exc).strip() or exc.__class__.__name__
     if len(message) > 300:
@@ -279,25 +457,34 @@ def transcription_error(exc: Exception) -> str:
 
 @app.get("/health")
 def health() -> dict:
+    google = "ready" if gemini_api_key() else "missing"
     if state["error"]:
-        return {"status": "error", "detail": state["error"], "model": MODEL_ID}
+        return {"status": "error", "detail": state["error"], "model": MODEL_ID, "google": google}
     if state["loading"] or state["model"] is None:
-        return {"status": "loading", "model": MODEL_ID}
-    return {"status": "ready", "model": MODEL_ID, "language": DEFAULT_LANGUAGE}
+        return {"status": "loading", "model": MODEL_ID, "google": google}
+    return {"status": "ready", "model": MODEL_ID, "language": DEFAULT_LANGUAGE, "google": google}
 
 
-def require_model(decoder: str, language: str) -> None:
-    if decoder not in {"ctc", "rnnt"}:
-        raise HTTPException(status_code=400, detail="Decoder must be ctc or rnnt.")
+def require_engine(engine: str, decoder: str, language: str) -> None:
+    if engine not in ENGINES:
+        raise HTTPException(status_code=400, detail="Model must be indic or google.")
     if language not in LANGUAGES:
         raise HTTPException(status_code=400, detail="Unsupported language id.")
+    if engine == "google":
+        if language not in GEMINI_LANGUAGES:
+            raise HTTPException(status_code=400, detail="The Google model in this app transcribes Malayalam.")
+        if not gemini_api_key():
+            raise HTTPException(status_code=503, detail="Add GEMINI_API_KEY to .env to use the Google model.")
+        return
+    if decoder not in {"ctc", "rnnt"}:
+        raise HTTPException(status_code=400, detail="Decoder must be ctc or rnnt.")
     if state["error"]:
         raise HTTPException(status_code=503, detail=state["error"])
     if state["loading"] or state["model"] is None:
         raise HTTPException(status_code=503, detail="The model is still downloading.")
 
 
-def transcribe_bytes(payload: bytes, filename: str, language: str, decoder: str) -> str:
+def transcribe_bytes(payload: bytes, filename: str, language: str, decoder: str, engine: str) -> str:
     if not payload:
         raise HTTPException(status_code=400, detail="The audio file is empty.")
     if len(payload) > MAX_BYTES:
@@ -311,9 +498,10 @@ def transcribe_bytes(payload: bytes, filename: str, language: str, decoder: str)
     with tempfile.TemporaryDirectory() as tmp:
         src = Path(tmp) / f"input{suffix}"
         src.write_bytes(payload)
-        wav = to_16k_mono(src)
         try:
-            return transcribe_wav(wav, language, decoder)
+            if engine == "google":
+                return transcribe_gemini(export_16k_wav(src), language)
+            return transcribe_wav(to_16k_mono(src), language, decoder)
         except HTTPException:
             raise
         except Exception as exc:
@@ -335,10 +523,11 @@ async def transcribe_upload(
     audio: UploadFile = File(...),
     language: str = Form(DEFAULT_LANGUAGE),
     decoder: str = Form(DEFAULT_DECODER),
+    model: str = Form(DEFAULT_ENGINE),
 ) -> dict:
-    require_model(decoder, language)
-    text = transcribe_bytes(await audio.read(), audio.filename or "audio.wav", language, decoder)
-    return {"text": text, "language": language, "decoder": decoder}
+    require_engine(model, decoder, language)
+    text = transcribe_bytes(await audio.read(), audio.filename or "audio.wav", language, decoder, model)
+    return {"text": text, "language": language, "decoder": decoder if model == "indic" else "", "model": model}
 
 
 @app.post("/evaluate")
@@ -347,13 +536,15 @@ async def evaluate_upload(
     reference: str = Form(""),
     language: str = Form(DEFAULT_LANGUAGE),
     decoder: str = Form(DEFAULT_DECODER),
+    model: str = Form(DEFAULT_ENGINE),
 ) -> dict:
-    require_model(decoder, language)
-    hypothesis = transcribe_bytes(await audio.read(), audio.filename or "audio.wav", language, decoder)
+    require_engine(model, decoder, language)
+    hypothesis = transcribe_bytes(await audio.read(), audio.filename or "audio.wav", language, decoder, model)
     return {
         "filename": audio.filename or "audio.wav",
         "language": language,
-        "decoder": decoder,
+        "model": model,
+        "decoder": decoder if model == "indic" else "",
         "hypothesis": hypothesis,
         "reference": reference.strip(),
         "character_error_rate": error_rate(reference, hypothesis, by_word=False),

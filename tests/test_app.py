@@ -25,11 +25,14 @@ def test_index_has_upload_form(client):
     assert "Start recording" in response.text
 
 
-def test_health_skips_model_load(client):
+def test_health_skips_model_load(client, monkeypatch):
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
     response = client.get("/health")
     assert response.status_code == 200
-    assert response.json()["status"] == "loading"
-    assert response.json()["model"] == main.MODEL_ID
+    body = response.json()
+    assert body["status"] == "loading"
+    assert body["model"] == main.MODEL_ID
+    assert body["google"] == "missing"
 
 
 def test_transcribe_requires_a_loaded_model(client):
@@ -58,7 +61,7 @@ def test_transcribe_returns_text(client, monkeypatch):
     )
 
     assert response.status_code == 200
-    assert response.json() == {"text": "നമസ്കാരം", "language": "ml", "decoder": "ctc"}
+    assert response.json() == {"text": "നമസ്കാരം", "language": "ml", "decoder": "ctc", "model": "indic"}
 
 
 def test_transcribe_rejects_an_unknown_decoder(client):
@@ -172,6 +175,152 @@ def test_evaluate_returns_malayalam_and_the_error_rate(client, monkeypatch):
     assert body["word_error_rate"] == 1.0
     assert body["diff"]["reference"][-1]["kind"] == "equal"
     assert any(span["kind"] == "change" for span in body["diff"]["hypothesis"])
+
+
+def test_index_offers_google(client):
+    response = client.get("/")
+    assert "Google" in response.text
+    assert "IndicConformer" in response.text
+
+
+def test_google_transcribe_skips_the_local_model(client, monkeypatch):
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+    monkeypatch.setattr(main, "export_16k_wav", lambda src: src)
+    monkeypatch.setattr(main, "transcribe_gemini", lambda path, language: "ഹലോ")
+    main.state["model"] = None
+    main.state["loading"] = True
+
+    response = client.post(
+        "/transcribe",
+        files={"audio": ("clip.wav", b"RIFFxxxx", "audio/wav")},
+        data={"model": "google", "language": "ml"},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"text": "ഹലോ", "language": "ml", "decoder": "", "model": "google"}
+
+
+def test_google_without_a_key_explains_how_to_set_it(client, monkeypatch):
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    response = client.post(
+        "/transcribe",
+        files={"audio": ("clip.wav", b"RIFFxxxx", "audio/wav")},
+        data={"model": "google", "language": "ml"},
+    )
+    assert response.status_code == 503
+    assert "GEMINI_API_KEY" in response.json()["detail"]
+
+
+def test_transcribe_rejects_an_unknown_model(client):
+    response = client.post(
+        "/transcribe",
+        files={"audio": ("clip.wav", b"RIFFxxxx", "audio/wav")},
+        data={"model": "whisper", "language": "ml"},
+    )
+    assert response.status_code == 400
+
+
+def test_gemini_transcript_joins_text_parts():
+    payload = {"candidates": [{"content": {"parts": [{"text": "ഹലോ"}, {"text": "നമസ്കാരം"}]}}]}
+    assert main.gemini_transcript(payload) == "ഹലോ നമസ്കാരം"
+
+
+def test_gemini_rate_limit_mentions_the_free_tier():
+    error = main.gemini_failure(429, b'{"error":{"message":"quota"}}')
+    assert error.status_code == 429
+    assert "free limit" in error.detail
+
+
+def test_transcribe_gemini_asks_for_malayalam(tmp_path, monkeypatch):
+    wav_path = tmp_path / "clip.wav"
+    with main.wave.open(str(wav_path), "wb") as handle:
+        handle.setnchannels(1)
+        handle.setsampwidth(2)
+        handle.setframerate(16000)
+        handle.writeframes(b"\x00\x00" * 1600)
+
+    calls = []
+
+    class _Response:
+        def __init__(self, payload, headers=None):
+            self.payload = json_payload(payload)
+            self.headers = {key.lower(): value for key, value in (headers or {}).items()}
+
+        def read(self):
+            return self.payload
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+    def json_payload(payload):
+        import json
+
+        return json.dumps(payload).encode()
+
+    def fake_urlopen(request, timeout):
+        calls.append(request)
+        if request.method == "DELETE":
+            return _Response({})
+        if request.full_url.endswith("/upload/v1beta/files"):
+            return _Response({}, {"x-goog-upload-url": "https://example.test/upload/abc"})
+        if request.full_url == "https://example.test/upload/abc":
+            return _Response(
+                {
+                    "file": {
+                        "name": "files/abc",
+                        "uri": "https://example.test/files/abc",
+                        "mimeType": "audio/wav",
+                        "state": "ACTIVE",
+                    }
+                }
+            )
+        return _Response({"candidates": [{"content": {"parts": [{"text": "ഹലോ"}]}}]})
+
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+    monkeypatch.setattr(main.urllib.request, "urlopen", fake_urlopen)
+
+    assert main.transcribe_gemini(wav_path, "ml") == "ഹലോ"
+    generate = next(request for request in calls if "generateContent" in request.full_url)
+    import json
+
+    body = json.loads(generate.data.decode())
+    assert "gemini-3.5-transcribe" in generate.full_url
+    assert body["generationConfig"]["audioTranscriptionConfig"]["languageCodes"] == ["ml-IN"]
+    start = next(request for request in calls if request.full_url.endswith("/upload/v1beta/files"))
+    assert start.get_header("X-goog-upload-command") == "start"
+    assert "test-key" not in generate.full_url
+    assert generate.get_header("X-goog-api-key") == "test-key"
+    assert any(request.method == "DELETE" for request in calls)
+
+
+def test_transcribe_gemini_rejects_audio_longer_than_an_hour(tmp_path, monkeypatch):
+    monkeypatch.setattr(main, "wav_seconds", lambda path: 3601)
+    with pytest.raises(main.HTTPException) as caught:
+        main.transcribe_gemini(tmp_path / "long.wav", "ml")
+    assert caught.value.status_code == 400
+
+
+def test_evaluate_can_use_google(client, monkeypatch):
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+    monkeypatch.setattr(main, "export_16k_wav", lambda src: src)
+    monkeypatch.setattr(main, "transcribe_gemini", lambda path, language: "ഹലോ")
+    main.state["model"] = None
+    main.state["loading"] = True
+
+    response = client.post(
+        "/evaluate",
+        files={"audio": ("call.wav", b"RIFFxxxx", "audio/wav")},
+        data={"model": "google", "language": "ml", "reference": "ഹലോ"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["model"] == "google"
+    assert body["hypothesis"] == "ഹലോ"
+    assert body["character_error_rate"] == 0
 
 
 def test_gated_download_error_mentions_the_token():
