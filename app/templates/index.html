@@ -82,6 +82,7 @@
     .status { color: var(--muted); min-height: 1.25rem; }
     .status.error { color: var(--warn); }
     .status.ready { color: var(--ok); }
+    .note { color: var(--muted); font-size: 0.9rem; margin: 0.75rem 0 0; }
     nav { margin: 0 0 1rem; }
     nav a { color: var(--accent); }
   </style>
@@ -90,14 +91,23 @@
   <main>
     <nav><a href="/evaluate">Evaluation</a></nav>
     <h1>Malayalam transcription</h1>
-    <p class="lede">IndicConformer turns a Malayalam recording into text. Use the microphone or upload a wav, mp3, m4a, or flac file. Long recordings are split into one-minute pieces.</p>
+    <p class="lede">Turn a Malayalam recording into text. IndicConformer runs on this machine. Google Gemini sends the recording to Google. Use the microphone or upload a wav, mp3, m4a, or flac file.</p>
 
     <form id="form">
-      <label for="decoder">Decoder</label>
-      <select id="decoder" name="decoder">
-        <option value="rnnt" selected>RNNT</option>
-        <option value="ctc">CTC</option>
+      <label for="model">Model</label>
+      <select id="model" name="model">
+        <option value="indic" selected>IndicConformer</option>
+        <option value="google">Google</option>
       </select>
+      <p class="note" id="google-note" hidden>The recording is sent to Google Gemini. A free key has a daily limit, and Google may use free-tier audio to improve its products.</p>
+
+      <div id="decoder-field">
+        <label for="decoder">Decoder</label>
+        <select id="decoder" name="decoder">
+          <option value="rnnt" selected>RNNT</option>
+          <option value="ctc">CTC</option>
+        </select>
+      </div>
 
       <label>Audio</label>
       <div class="drop" id="drop">
@@ -135,6 +145,8 @@
     let transcribing = false;
     let recording = false;
     let holdStatus = false;
+    let health = null;
+    const modelSelect = document.getElementById("model");
 
     function setStatus(message, kind, hold = false) {
       status.textContent = message || "";
@@ -156,26 +168,38 @@
       fileLabel.textContent = file.name + " (" + megabytes + " MB)";
     }
 
-    async function pollHealth() {
+    function usingGoogle() {
+      return modelSelect.value === "google";
+    }
+
+    function applyEngine() {
+      const google = usingGoogle();
+      document.getElementById("decoder-field").hidden = google;
+      document.getElementById("google-note").hidden = !google;
       let nextReady = false;
       let nextMessage = "Checking the model…";
       let nextKind = "";
-      try {
-        const response = await fetch("/health");
-        const payload = await response.json();
-        if (payload.status === "ready") {
-          nextReady = true;
-          nextMessage = "Model is ready.";
-          nextKind = "ready";
-        } else if (payload.status === "error") {
-          nextMessage = payload.detail || "The model failed to load.";
-          nextKind = "error";
-        } else {
-          nextMessage = "Downloading IndicConformer. The first start can take several minutes.";
-        }
-      } catch (error) {
+      if (!health) {
         nextMessage = "The transcription service is not responding.";
         nextKind = "error";
+      } else if (google) {
+        if (health.google === "ready") {
+          nextReady = true;
+          nextMessage = "Google is ready.";
+          nextKind = "ready";
+        } else {
+          nextMessage = "Add GEMINI_API_KEY to .env to use the Google model.";
+          nextKind = "error";
+        }
+      } else if (health.status === "ready") {
+        nextReady = true;
+        nextMessage = "Model is ready.";
+        nextKind = "ready";
+      } else if (health.status === "error") {
+        nextMessage = health.detail || "The model failed to load.";
+        nextKind = "error";
+      } else {
+        nextMessage = "Downloading IndicConformer. The first start can take several minutes.";
       }
       modelReady = nextReady;
       const modelFailed = nextKind === "error" && !nextReady;
@@ -183,6 +207,16 @@
         setStatus(nextMessage, nextKind);
       }
       refreshButtons();
+    }
+
+    async function pollHealth() {
+      try {
+        const response = await fetch("/health");
+        health = await response.json();
+      } catch (error) {
+        health = null;
+      }
+      applyEngine();
     }
 
     audioInput.addEventListener("change", () => {
@@ -255,6 +289,7 @@
       }
       const body = new FormData();
       body.append("audio", file);
+      body.append("model", modelSelect.value);
       body.append("decoder", document.getElementById("decoder").value);
       body.append("language", "ml");
       transcribing = true;
@@ -270,7 +305,9 @@
         }
         const transcript = (payload.text || "").trim();
         if (!transcript) {
-          text.textContent = "No words were recognized. Try the RNNT decoder, or use a short clip of spoken Malayalam.";
+          text.textContent = usingGoogle()
+            ? "No words were recognized."
+            : "No words were recognized. Try the RNNT decoder, or use a short clip of spoken Malayalam.";
           setStatus("No words were recognized.", "error", true);
         } else {
           text.textContent = payload.text;
@@ -285,6 +322,7 @@
       }
     });
 
+    modelSelect.addEventListener("change", applyEngine);
     pollHealth();
     setInterval(pollHealth, 3000);
   </script>
